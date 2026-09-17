@@ -3,6 +3,7 @@ __pycache__/
 .env
 media/
 vocab_files/
+idioms/
 venv/
 *.log
 .DS_Store

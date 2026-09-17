@@ -4,6 +4,7 @@ __pycache__/
 media/
 vocab_files/
 idioms/
+ows/
 venv/
 *.log
 .DS_Store

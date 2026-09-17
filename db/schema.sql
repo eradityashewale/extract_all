@@ -118,3 +118,53 @@ CREATE TABLE IF NOT EXISTS idiom_images (
 -- updates that row instead of inserting a duplicate.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_idioms_idiom_unique ON idioms (lower(idiom));
 CREATE INDEX IF NOT EXISTS idx_idiom_quiz_options_quiz_id ON idiom_quiz_options (quiz_id);
+
+-- OWS (one-word-substitution) database schema
+-- One row in source_files (shared with vocab/idioms) per imported
+-- "Substitution(s) - N (...).docx". Like vocab, these files carry a part of
+-- speech and per-quiz-option definitions; like idioms, exactly one example
+-- per word, so it's a plain column instead of a child table.
+
+CREATE TABLE IF NOT EXISTS ows_words (
+    id                   SERIAL PRIMARY KEY,
+    source_file_id       INTEGER NOT NULL REFERENCES source_files(id) ON DELETE CASCADE,
+    word_number          INTEGER NOT NULL,          -- position within the file (1-10)
+    word                 TEXT NOT NULL,
+    part_of_speech       TEXT,                       -- n, v, adj, ...
+    meaning              TEXT NOT NULL,
+    meaning_translation  TEXT,                       -- e.g. the Hindi gloss in parentheses
+    example_text         TEXT,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_file_id, word_number)
+);
+
+-- One quiz per word (the doc only ever has one "Quiz -" question per entry).
+CREATE TABLE IF NOT EXISTS ows_quizzes (
+    id           SERIAL PRIMARY KEY,
+    ows_word_id  INTEGER NOT NULL UNIQUE REFERENCES ows_words(id) ON DELETE CASCADE,
+    question     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ows_quiz_options (
+    id            SERIAL PRIMARY KEY,
+    quiz_id       INTEGER NOT NULL REFERENCES ows_quizzes(id) ON DELETE CASCADE,
+    option_label  CHAR(1) NOT NULL CHECK (option_label IN ('A', 'B', 'C', 'D')),
+    option_text   TEXT NOT NULL,
+    is_correct    BOOLEAN NOT NULL DEFAULT FALSE,
+    description   TEXT,                              -- definition of the option, when the doc gives one (usually the wrong answers)
+    UNIQUE (quiz_id, option_label)
+);
+
+-- Image stays on disk; this row is just the pointer + metadata.
+CREATE TABLE IF NOT EXISTS ows_images (
+    id                SERIAL PRIMARY KEY,
+    ows_word_id       INTEGER NOT NULL UNIQUE REFERENCES ows_words(id) ON DELETE CASCADE,
+    file_path         TEXT NOT NULL,                 -- relative to MEDIA_ROOT, e.g. substitution-1-28-may/warrant.jpeg
+    content_type      TEXT,
+    file_size_bytes   INTEGER
+);
+
+-- Global upsert key: importing an OWS word that already exists (by word, case-insensitive)
+-- updates that row instead of inserting a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ows_words_word_unique ON ows_words (lower(word));
+CREATE INDEX IF NOT EXISTS idx_ows_quiz_options_quiz_id ON ows_quiz_options (quiz_id);

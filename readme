@@ -1,0 +1,4 @@
+(venv) C:\Users\user\Documents\GitHub\extract_all>python upload_idioms.py --items "41(4),42(4),43(4),44(4),45(4),46(4),47(4),48(4),49(4),50(4)" --date 18/9/2026 --with-images 
+python upload_ows.py --items "1(4),2(4),3(4),4(4),5(4),6(4),7(4),8(4),9(4),10(4)" --date 18/9/2026 --with-images
+
+vocab - 32

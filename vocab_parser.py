@@ -49,6 +49,11 @@ DEF_RE = re.compile(r"^(?P<word>[^(]+?)\s*\((?P<pos>[^)]+)\)\s*[-–]?\s*(?P<res
 PHOTO_HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<word>.+)$")
 LEADING_NUM_RE = re.compile(r"^\d+[.\)]\s*")
 TRANSLATION_RE = re.compile(r"^(?P<meaning>.*?)\s*\((?P<translation>[^)]*[ऀ-ॿ][^)]*)\)\s*$")
+# Both require the dash, so an option/synonym word that happens to start
+# with "quiz" or "hint" (e.g. "Quizzical", "Hinterland") isn't mistaken for
+# the "Quiz - ..." / "Hint - ..." marker line.
+QUIZ_LINE_RE = re.compile(r"^quiz\s*[-–:]", re.IGNORECASE)
+HINT_LINE_RE = re.compile(r"^hint\s*[-–:]", re.IGNORECASE)
 
 
 @dataclass
@@ -180,30 +185,47 @@ def _parse_block(block: list[dict]) -> WordEntry:
     else:
         entry.warnings.append("No 'Examples' section found.")
 
-    # --- Synonyms ---
+    # --- Synonyms (optional continuation paragraph with no "Synonyms" prefix) ---
     if i < len(block) and block[i]["text"].lower().startswith("synonym"):
         syn_text = re.sub(r"^synonyms?\s*[-–]\s*", "", block[i]["text"], flags=re.IGNORECASE)
-        entry.synonyms = [s.strip(" .") for s in re.split(r"[,/]", syn_text) if s.strip(" .")]
         i += 1
+        while i < len(block) and not (HINT_LINE_RE.match(block[i]["text"]) or QUIZ_LINE_RE.match(block[i]["text"])):
+            syn_text = f"{syn_text} {block[i]['text'].strip()}"
+            i += 1
+        entry.synonyms = [s.strip(" .") for s in re.split(r"[,/]", syn_text) if s.strip(" .")]
     else:
         entry.warnings.append("No 'Synonyms' line found.")
 
-    # --- Hint (optional) ---
-    if i < len(block) and block[i]["text"].lower().startswith("hint"):
-        entry.hint = re.sub(r"^hint\s*[-–]?\s*", "", block[i]["text"], flags=re.IGNORECASE).strip()
+    # --- Hint (optional; may spill onto a continuation paragraph with no "Hint" prefix) ---
+    if i < len(block) and HINT_LINE_RE.match(block[i]["text"]):
+        hint_parts = [re.sub(r"^hint\s*[-–]?\s*", "", block[i]["text"], flags=re.IGNORECASE).strip()]
         i += 1
+        while i < len(block) and not QUIZ_LINE_RE.match(block[i]["text"]):
+            hint_parts.append(block[i]["text"].strip())
+            i += 1
+        entry.hint = " ".join(p for p in hint_parts if p)
 
-    # --- Quiz question ---
-    if i < len(block) and block[i]["text"].lower().startswith("quiz"):
-        entry.quiz_question = re.sub(r"^quiz\s*[-–]?\s*", "", block[i]["text"], flags=re.IGNORECASE).strip()
+    # --- Quiz question (two consecutive "Quiz -" lines means the first one
+    # was actually a mislabeled Hint/mnemonic that should've said "Hint -") ---
+    if i < len(block) and QUIZ_LINE_RE.match(block[i]["text"]):
+        first_text = re.sub(r"^quiz\s*[-–]?\s*", "", block[i]["text"], flags=re.IGNORECASE).strip()
         i += 1
+        if i < len(block) and QUIZ_LINE_RE.match(block[i]["text"]):
+            entry.hint = f"{entry.hint} {first_text}".strip() if entry.hint else first_text
+            entry.warnings.append(
+                f"Two consecutive 'Quiz' lines found; treated the first ('{first_text}') as an extra hint."
+            )
+            entry.quiz_question = re.sub(r"^quiz\s*[-–]?\s*", "", block[i]["text"], flags=re.IGNORECASE).strip()
+            i += 1
+        else:
+            entry.quiz_question = first_text
     else:
         entry.warnings.append("No 'Quiz' question found.")
 
     # --- 4 options ---
     labels = ["A", "B", "C", "D"]
     for label in labels:
-        if i < len(block) and not block[i]["text"].lower().startswith("quiz"):
+        if i < len(block) and not QUIZ_LINE_RE.match(block[i]["text"]):
             entry.quiz_options.append(
                 QuizOption(label=label, text=block[i]["text"].strip(), is_bold=block[i]["bold"])
             )

@@ -2,3 +2,22 @@
 python upload_ows.py --items "1(4),2(4),3(4),4(4),5(4),6(4),7(4),8(4),9(4),10(4)" --date 18/9/2026 --with-images
 
 vocab - 32
+C:\Users\user\Documents\GitHub\extract_all>python upload_vocab.py --file 36 --date 19/9/2026 --with-image
+
+python upload_quiz.py --vocab-items "..." --idiom-items "..." --ows-items "..." --date 19/9/2026 --dry-run
+
+vocab - 35
+idioms - 41(6)
+ows-1(6)
+
+python upload_quiz.py --vocab-items "38(1),38(2),38(3),38(4),38(5),38(6),38(7),38(8),38(9),38(10)" --idiom-items "41(8),42(8),43(8),44(8),45(8),46(8),47(8),48(8),49(8),50(8)" --ows-items "1(8),2(8),3(8),4(8),5(8),6(8),7(8),8(8),9(8),10(8)" --date 24/9/2026 
+
+
+python upload_vocab.py --file 38 --date 24/9/2026 --with-images
+
+python upload_idioms.py --items "41(8),42(8),43(8),44(8),45(8),46(8),47(8),48(8),49(8),50(8)" --date 24/9/2026 --with-images
+
+python upload_ows.py --items "1(8),2(8),3(8),4(8),5(8),6(8),7(8),8(8),9(8),10(8)" --date 24/9/2026 --with-images
+
+
+daily 38 41-50 1-10 8 24/9/2026

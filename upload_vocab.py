@@ -85,8 +85,21 @@ def _load_env_value(name: str, cli_value: str | None) -> str | None:
     return None
 
 
+def _load_cookie_parts() -> str | None:
+    """Joins every `COOKIE_<name>=value` line in .env into one Cookie header value."""
+    env_path = Path(".env")
+    if not env_path.exists():
+        return None
+    parts = []
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*COOKIE_(?P<name>[^=\s]+)\s*=\s*(?P<value>.*?)\s*$", line)
+        if m and m.group("value"):
+            parts.append(f"{m.group('name')}={m.group('value').strip().strip(chr(34)).strip(chr(39))}")
+    return "; ".join(parts) or None
+
+
 def load_session_cookie(cli_cookie: str | None) -> str | None:
-    return _load_env_value("ADMIN_SESSION_COOKIE", cli_cookie)
+    return cli_cookie or _load_cookie_parts() or _load_env_value("ADMIN_SESSION_COOKIE", None)
 
 
 def load_device_id(cli_device_id: str | None) -> str | None:

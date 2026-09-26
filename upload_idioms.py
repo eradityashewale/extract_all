@@ -65,7 +65,8 @@ def parse_items(text: str) -> list[tuple[int, int]]:
 
 
 def find_idiom_file(number: int, input_dir: Path) -> Path:
-    matches = sorted(input_dir.glob(f"Idioms - {number} (*).docx"))
+    # Names vary: "Idioms - 1.docx", "Idioms - 7 - (3 June).docx", "Idioms - 41 ( 8 July ).docx"
+    matches = sorted(p for p in input_dir.glob("Idioms - *.docx") if re.match(rf"Idioms - {number}\b", p.name))
     if not matches:
         print(f"No file found in {input_dir} for idiom file number {number}", file=sys.stderr)
         sys.exit(1)
@@ -83,7 +84,10 @@ def parse_date_from_filename(path: Path, year: int) -> str:
         sys.exit(1)
     day, month = m.groups()
     try:
-        dt = datetime.strptime(f"{day} {month} {year}", "%d %B %Y")
+        try:
+            dt = datetime.strptime(f"{day} {month} {year}", "%d %B %Y")
+        except ValueError:
+            dt = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")  # "1 Aug"
     except ValueError as exc:
         print(f"Couldn't parse date '{day} {month} {year}' from filename '{path.name}': {exc}", file=sys.stderr)
         sys.exit(1)

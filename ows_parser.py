@@ -43,13 +43,22 @@ from dataclasses import dataclass, field
 import docx
 from docx.oxml.ns import qn
 
-HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<word>.+?)\s*\((?P<pos>[^)]{1,15})\)\s*[:\-–—]\s*(?P<rest>.*)$")
-PHOTO_HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<word>.+?):?\s*$")
+# "1.Word (pos) - meaning" or, without a part of speech, "5. Gambol – meaning".
+# Without a pos a plain hyphen only counts as the separator when it has a
+# space on one side, so hyphenated words stay intact.
+_SEP = r"(?:\s*\((?P<pos>[^)]{1,15})\)\s*[:\-–—]|\s*[:–—]|\s+-|-\s)"
+HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<word>[^():–—]+?)" + _SEP + r"\s*(?P<rest>.+)$")
+# Photo headings: "1.Word", "2." (word left blank) -- or, in some files, just "Word".
+PHOTO_HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<word>.*?)[\s:\-–—]*$")
 PHOTO_MARKER_RE = re.compile(r"^(?:[a-z]+\s+with\s+photos|photos:?)$", re.IGNORECASE)
 TRANSLATION_RE = re.compile(r"^(?P<meaning>.*?)\s*\((?P<translation>[^)]*[ऀ-ॿ][^)]*)\)\s*$")
 EXAMPLE_LABEL_RE = re.compile(r"^examples?\s*[:\-–—]?\s*", re.IGNORECASE)
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
-DEF_RE = re.compile(r"^(?P<word>[^(]+?)\s*\((?P<pos>[^)]+)\)\s*[-–]?\s*(?P<rest>.*)$")
+# "Word (pos) - meaning", or "Word: meaning" / "Word – meaning" with no pos.
+DEF_RE = re.compile(
+    r"^(?P<word>[^(:–—]{1,40}?)(?:\s*\((?P<pos>[^)]+)\)\s*[-–:]?|\s*[:–—]|\s+-|-\s)\s*(?P<rest>.*)$"
+)
+HINT_RE = re.compile(r"^hint\b", re.IGNORECASE)
 VOCAB_OF_QUIZ_RE = re.compile(r"^vocab\s+(?:of|for)\s+quiz\b", re.IGNORECASE)
 # Requires the dash, so an option word that happens to start with "quiz"
 # (e.g. "Quizzical") isn't mistaken for the "Quiz - ..." marker line.
@@ -114,7 +123,24 @@ def parse_docx(path: str) -> tuple[list[OwsEntry], list[str]]:
     )
     body, photos = paras[:split_idx], paras[split_idx + 1 :]
 
-    header_idxs = [i for i, p in enumerate(body) if HEADER_RE.match(p["text"])]
+    # Some files have no marker at all (e.g. a second "Vocab for quiz" where the
+    # marker should be); then the photos start at the heading of the first image.
+    if not photos:
+        first_img = next((i for i, p in enumerate(paras) if p["rids"]), None)
+        if first_img is not None:
+            if first_img > 0 and not paras[first_img]["text"] and len(paras[first_img - 1]["text"]) < 40:
+                first_img -= 1
+            body, photos = paras[:first_img], paras[first_img:]
+
+    # Entry numbers only go up, so a stray numbered line inside a block isn't
+    # mistaken for a new entry.
+    header_idxs = []
+    last_number = 0
+    for i, p in enumerate(body):
+        m = HEADER_RE.match(p["text"])
+        if m and int(m.group(1)) > last_number:
+            header_idxs.append(i)
+            last_number = int(m.group(1))
     if not header_idxs:
         file_warnings.append("No numbered entries found at all.")
         return [], file_warnings
@@ -124,28 +150,31 @@ def parse_docx(path: str) -> tuple[list[OwsEntry], list[str]]:
         end = header_idxs[n + 1] if n + 1 < len(header_idxs) else len(body)
         entries.append(_parse_block(body[start:end]))
 
-    # --- match images from the photos section (same layout as idiom_parser.py) ---
-    current_idx = -1
-    photo_words_seen: list[str] = []
+    # --- match images from the photos section ---
+    # Each heading is matched to an entry by word; when the heading is blank or
+    # names something else (e.g. a quiz option), fall back to its position.
+    # Older files leave the headings unnumbered, and some put the image in the
+    # same paragraph as its heading.
+    numbered = any(PHOTO_HEADER_RE.match(p["text"]) for p in photos)
+    slot, target = -1, None
     for p in photos:
         m = PHOTO_HEADER_RE.match(p["text"])
-        if m:
-            photo_words_seen.append(m.group("word").strip())
-            current_idx += 1
-            continue
-        if p["rids"]:
-            if current_idx < 0 or current_idx >= len(entries):
-                file_warnings.append(f"Image found with no matching entry slot (rid={p['rids'][0]}).")
-                continue
-            target = entries[current_idx]
-            expected = photo_words_seen[current_idx] if current_idx < len(photo_words_seen) else None
-            if expected and expected.lower() != target.word.lower():
+        if m or (not numbered and p["text"]):
+            slot += 1
+            heading = (m.group("word") if m else p["text"]).strip()
+            target = _match_photo_heading(heading, slot, entries)
+            if target is None:
+                file_warnings.append(f"Photo heading '{p['text']}' at position {slot + 1} has no matching entry.")
+            elif heading and _norm(heading) != _norm(target.word):
                 file_warnings.append(
-                    f"Photo section word '{expected}' at position {current_idx + 1} "
-                    f"doesn't match parsed word '{target.word}' at the same position; "
-                    "assigned by position anyway."
+                    f"Photo section word '{heading}' at position {slot + 1} doesn't match parsed word "
+                    f"'{target.word}'; assigned by position."
                 )
-            target.image_rid = p["rids"][0]
+        if p["rids"]:
+            if target is None:
+                file_warnings.append(f"Image found with no matching entry slot (rid={p['rids'][0]}).")
+            elif target.image_rid is None:  # extra images for the same entry: keep the first
+                target.image_rid = p["rids"][0]
 
     for e in entries:
         if e.image_rid is None:
@@ -154,35 +183,48 @@ def parse_docx(path: str) -> tuple[list[OwsEntry], list[str]]:
     return entries, file_warnings
 
 
+def _norm(word: str) -> str:
+    return re.sub(r"[^a-z]", "", word.lower())
+
+
+def _match_photo_heading(heading: str, slot: int, entries: list[OwsEntry]) -> OwsEntry | None:
+    h = _norm(heading)
+    if h:
+        free = [e for e in entries if e.image_rid is None]
+        for e in free:
+            if _norm(e.word) == h:
+                return e
+        for e in free:  # "Forfeited" -> "Forfeit"
+            w = _norm(e.word)
+            if len(w) >= 4 and (h.startswith(w) or w.startswith(h)):
+                return e
+    return entries[slot] if slot < len(entries) else None
+
+
 def _parse_block(block: list[dict]) -> OwsEntry:
     header = HEADER_RE.match(block[0]["text"])
     number = int(header.group(1))
     word = header.group("word").strip()
-    pos = header.group("pos").strip()
+    pos = header.group("pos").strip() if header.group("pos") else None
     meaning, translation = _split_translation(header.group("rest").strip())
 
     entry = OwsEntry(number=number, word=word, part_of_speech=pos, meaning=meaning, meaning_translation=translation)
 
+    # The example usually comes before the quiz, but some entries put it after.
     example = None
-    i = 1
-    while i < len(block):
-        text = block[i]["text"]
-        tl = text.lower()
-        if tl.startswith("example"):
+    for k in range(1, len(block)):
+        text = block[k]["text"]
+        if text.lower().startswith("example"):
             inline = EXAMPLE_LABEL_RE.sub("", text).strip()
             if inline:
                 example = inline
-                i += 1
-            elif i + 1 < len(block):
-                example = block[i + 1]["text"].strip()
-                i += 2
-            else:
-                i += 1
-            continue
-        if QUIZ_LINE_RE.match(text):
-            entry.quiz_question = re.sub(r"^quiz\s*[-–]?\s*", "", text, flags=re.IGNORECASE).strip()
-            i += 1
+            elif k + 1 < len(block):
+                example = block[k + 1]["text"].strip()
             break
+
+    i = next((k for k in range(1, len(block)) if QUIZ_LINE_RE.match(block[k]["text"])), len(block))
+    if i < len(block):
+        entry.quiz_question = re.sub(r"^quiz\s*[-–:]?\s*", "", block[i]["text"], flags=re.IGNORECASE).strip()
         i += 1
 
     if not example:
@@ -198,12 +240,16 @@ def _parse_block(block: list[dict]) -> OwsEntry:
     # definition-shaped line, whichever comes first. Some entries give an
     # alternate phrasing of the question on an extra "or ..." line before
     # the real 4 options -- when there are more than 4 candidates, treat
-    # the leading overflow as part of the question.
+    # the leading overflow as part of the question. A "Hint", "Example" or
+    # repeated "Quiz -" line after the options also ends them.
     candidates = []
     while (
         i < len(block)
         and not VOCAB_OF_QUIZ_RE.match(block[i]["text"])
         and not DEF_RE.match(block[i]["text"])
+        and not HINT_RE.match(block[i]["text"])
+        and not QUIZ_LINE_RE.match(block[i]["text"])
+        and not block[i]["text"].lower().startswith("example")
     ):
         candidates.append(block[i])
         i += 1
@@ -220,15 +266,16 @@ def _parse_block(block: list[dict]) -> OwsEntry:
     if len(entry.quiz_options) != 4:
         entry.warnings.append(f"Expected 4 quiz options, found {len(entry.quiz_options)}.")
 
-    # --- skip the "Vocab of/for quiz" marker line ---
-    if i < len(block) and VOCAB_OF_QUIZ_RE.match(block[i]["text"]):
-        i += 1
+    # --- skip ahead to the "Vocab of/for quiz" marker line, if there is one ---
+    marker = next((k for k in range(i, len(block)) if VOCAB_OF_QUIZ_RE.match(block[k]["text"])), None)
+    if marker is not None:
+        i = marker + 1
 
     # --- trailing option definitions (== wrong answers) ---
     while i < len(block):
         text = block[i]["text"]
         m = DEF_RE.match(text)
-        if not m:
+        if not m or HINT_RE.match(text):
             i += 1
             continue
         def_word = m.group("word").strip()
@@ -247,7 +294,19 @@ def _parse_block(block: list[dict]) -> OwsEntry:
             entry.warnings.append(f"Trailing definition for '{def_word}' doesn't match any quiz option.")
         i = j
 
-    # The correct answer is the one option written in bold. Cross-check
+    # The option that is the headword itself is the answer; this beats the bold
+    # formatting, which is occasionally on the wrong option.
+    headword_opts = [o for o in entry.quiz_options if _norm(o.text) == _norm(entry.word)]
+    if len(headword_opts) == 1:
+        headword_opts[0].is_correct = True
+        bold_opts = [o for o in entry.quiz_options if o.is_bold]
+        if bold_opts and headword_opts[0] not in bold_opts:
+            entry.warnings.append(
+                f"Bold option '{bold_opts[0].text}' isn't the headword; used the headword option as the answer."
+            )
+        return entry
+
+    # Otherwise the correct answer is the one option written in bold. Cross-check
     # against the trailing-definition heuristic (the correct option is the
     # one that *doesn't* get its own definition afterward), and fall back to
     # that heuristic entirely when the author forgot to bold the answer.

@@ -37,7 +37,22 @@ import docx
 from docx.oxml.ns import qn
 
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
-HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<idiom>.+?):\s*(?P<rest>.*)$")
+# "1. Idiom: meaning" (files 38+) or, in older files, "1.Idiom (idiom) – meaning",
+# "1.Idiom – meaning", "1.Idiom- meaning". A plain hyphen only counts as the
+# separator when it has a space on one side, so "hand-to-mouth" stays intact.
+# Separators are tried in order, so "Lily - livered– meaning" splits on the dash.
+HEADER_RES = [
+    re.compile(r"^(\d+)\.\s*(?P<idiom>.+?)" + sep + r"\s*(?P<rest>.*)$")
+    for sep in (r"\s*:", r"\s*\((?:idiom|phrase|adj|adv|n|v)\.?\)\s*[:–—-]?", r"\s*[–—]", r"(?:\s+-|-\s)")
+]
+
+
+def _match_header(text: str):
+    for rx in HEADER_RES:
+        m = rx.match(text)
+        if m:
+            return m
+    return None
 PHOTO_HEADER_RE = re.compile(r"^(\d+)\.\s*(?P<idiom>.+?):?\s*$")
 TRANSLATION_RE = re.compile(r"^(?P<meaning>.*?)\s*\((?P<translation>[^)]*[ऀ-ॿ][^)]*)\)\s*$")
 
@@ -72,6 +87,13 @@ def _split_translation(text: str) -> tuple[str, str | None]:
     return text.strip(), None
 
 
+def _is_photo_heading(text: str) -> bool:
+    tl = text.lower().strip()
+    if tl.startswith("photo"):
+        return True
+    return len(tl) < 40 and not re.match(r"^\d+\.|quiz|example", tl) and ("photo" in tl or "with idioms" in tl)
+
+
 def _get_paragraphs(doc: docx.document.Document) -> list[dict]:
     """Flatten to significant paragraphs (has text or an inline image), in order."""
     out = []
@@ -91,15 +113,26 @@ def parse_docx(path: str) -> tuple[list[IdiomEntry], list[str]]:
 
     file_warnings: list[str] = []
 
-    # Split into the definitions section and the "Photos" section.
+    # Split into the definitions section and the "Photos" section. The heading is
+    # "Photos:" in newer files, "Idioms with photos" / "Vocab with idioms" in older ones.
     split_idx = next(
-        (i for i, p in enumerate(paras) if p["text"].lower().startswith("photo")),
+        (i for i, p in enumerate(paras) if _is_photo_heading(p["text"])),
         len(paras),
     )
     body, photos = paras[:split_idx], paras[split_idx + 1 :]
 
+    # Some files put "Photos:" too early, before the last idiom's quiz. That quiz
+    # (up to the first numbered photo) belongs to the body.
+    if photos and photos[0]["text"].lower().startswith("quiz"):
+        first_photo = next((i for i, p in enumerate(photos) if PHOTO_HEADER_RE.match(p["text"]) or p["rids"]), len(photos))
+        body, photos = body + photos[:first_photo], photos[first_photo:]
+
+    # Older files sometimes leave the photo headings unnumbered; then every text
+    # line in the photos section is a heading.
+    numbered_photos = any(PHOTO_HEADER_RE.match(p["text"]) for p in photos)
+
     # --- find headword line indexes ---
-    header_idxs = [i for i, p in enumerate(body) if HEADER_RE.match(p["text"])]
+    header_idxs = [i for i, p in enumerate(body) if _match_header(p["text"])]
     if not header_idxs:
         file_warnings.append("No numbered idiom headers found at all.")
         return [], file_warnings
@@ -115,15 +148,17 @@ def parse_docx(path: str) -> tuple[list[IdiomEntry], list[str]]:
     photo_idioms_seen: list[str] = []
     for p in photos:
         m = PHOTO_HEADER_RE.match(p["text"])
-        if m:
-            photo_idioms_seen.append(m.group("idiom").strip())
+        if m or (not numbered_photos and p["text"]):
+            photo_idioms_seen.append(m.group("idiom").strip() if m else p["text"])
             current_idiom_idx += 1
-            continue
+        # Some files put the image in the same paragraph as its numbered heading.
         if p["rids"]:
             if current_idiom_idx < 0 or current_idiom_idx >= len(entries):
                 file_warnings.append(f"Image found with no matching idiom slot (rid={p['rids'][0]}).")
                 continue
             target = entries[current_idiom_idx]
+            if target.image_rid is not None:
+                continue  # extra image for the same idiom; keep the first
             expected_idiom = photo_idioms_seen[current_idiom_idx] if current_idiom_idx < len(photo_idioms_seen) else None
             if expected_idiom and expected_idiom.lower() != target.idiom.lower():
                 file_warnings.append(
@@ -141,9 +176,9 @@ def parse_docx(path: str) -> tuple[list[IdiomEntry], list[str]]:
 
 
 def _parse_block(block: list[dict]) -> IdiomEntry:
-    header = HEADER_RE.match(block[0]["text"])
+    header = _match_header(block[0]["text"])
     number = int(header.group(1))
-    idiom = header.group("idiom").strip()
+    idiom = re.sub(r"\s+-\s+", "-", header.group("idiom").strip())  # "Lily - livered" -> "Lily-livered"
     rest = header.group("rest").strip()
 
     meaning, translation = _split_translation(rest)
@@ -153,6 +188,7 @@ def _parse_block(block: list[dict]) -> IdiomEntry:
     quiz_question: str | None = None
     quiz_options: list[QuizOption] = []
     unexpected: list[str] = []
+    example_pending = False  # "Example –" with the sentence on the next line (older files)
 
     for p in block[1:]:
         text, bold = p["text"], p["bold"]
@@ -161,10 +197,19 @@ def _parse_block(block: list[dict]) -> IdiomEntry:
             ex = re.sub(r"^examples?\s*[:\-–]?\s*", "", text, flags=re.IGNORECASE).strip()
             if ex:
                 examples.append(ex)
+            else:
+                example_pending = True
+        elif entry.meaning_translation is None and quiz_question is None and DEVANAGARI_RE.search(text) \
+                and re.fullmatch(r"\(.*\)", text.strip()):
+            entry.meaning_translation = text.strip()[1:-1].strip()  # translation on its own line
+        elif example_pending and not tl.startswith("quiz"):
+            examples.append(text.strip())
+            example_pending = False
         elif tl.startswith("quiz") and quiz_question is None:
+            example_pending = False
             quiz_question = re.sub(r"^quiz\s*[-–]?\s*", "", text, flags=re.IGNORECASE).strip()
-        elif quiz_question is not None and len(quiz_options) < 4:
-            quiz_options.append(QuizOption(label=LABELS[len(quiz_options)], text=text.strip(), is_bold=bold))
+        elif quiz_question is not None:
+            quiz_options.append(QuizOption(label="", text=text.strip(), is_bold=bold))
         else:
             unexpected.append(text)
 
@@ -174,6 +219,14 @@ def _parse_block(block: list[dict]) -> IdiomEntry:
         entry.example = examples[0]
         if len(examples) > 1:
             entry.warnings.append(f"Multiple 'Example' lines found ({len(examples)}); using the first.")
+
+    # A quiz question that wraps onto a second paragraph shows up as extra
+    # leading "options"; fold those back into the question.
+    if len(quiz_options) > 4 and quiz_question is not None:
+        extra, quiz_options = quiz_options[:-4], quiz_options[-4:]
+        quiz_question = " ".join([quiz_question] + [o.text for o in extra])
+    for label, opt in zip(LABELS, quiz_options):
+        opt.label = label
 
     if quiz_question is None:
         entry.warnings.append("No 'Quiz' question found.")

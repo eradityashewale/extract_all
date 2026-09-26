@@ -56,7 +56,8 @@ from upload_vocab import (
 )
 
 ITEM_RE = re.compile(r"(\d+)\s*\(\s*(\d+)\s*\)")
-FILENAME_DATE_RE = re.compile(r"\(\s*(\d{1,2})\s*([A-Za-z]+)\s*\)")
+# The date is always last: "(28 May )", "(10June)", "- 13 July", "(OWS 10 - 10 July)"
+FILENAME_DATE_RE = re.compile(r"(\d{1,2})\s*([A-Za-z]{3,})\s*\)?\s*\.docx$")
 FILENAME_NUMBER_RE = re.compile(r"^Substitutions?\s*-\s*(\d+)\b", re.IGNORECASE)
 
 
